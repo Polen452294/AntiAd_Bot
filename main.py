@@ -23,66 +23,38 @@ async def main() -> None:
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message) -> None:
-        # Ограничение по конкретной группе (если задано)
         if cfg.target_chat_id is not None and message.chat.id != cfg.target_chat_id:
             return
 
-        # 1) Запрет сообщений "от лица каналов"
-        # Важно: anonymous admin обычно sender_chat = supergroup (а не channel) — его не трогаем.
         if cfg.delete_channel_messages and message.sender_chat is not None:
             if message.sender_chat.type == ChatType.CHANNEL:
-                try:
-                    await message.delete()
-                    log.info(
-                        "Deleted channel-sender message: msg=%s chat=%s sender_chat_id=%s title=%r",
-                        message.message_id,
-                        message.chat.id,
-                        message.sender_chat.id,
-                        getattr(message.sender_chat, "title", None),
-                    )
-                except Exception as e:
-                    log.warning(
-                        "Failed to delete channel-sender msg=%s in chat=%s: %r",
-                        message.message_id,
-                        message.chat.id,
-                        e,
-                    )
-                return  # уже обработали
+                await message.delete()
+                log.info(
+                    "Deleted channel message: chat=%s sender_chat=%s",
+                    message.chat.id,
+                    message.sender_chat.id,
+                )
+                return
 
-        # 2) Антиреклама со ссылками (скоринг)
         d = decide(message, threshold=cfg.ad_score_threshold)
 
-        if d.has_link:
-            log.info(
-                "Decision: msg=%s chat=%s from=%s score=%s delete=%s reasons=%s text=%r",
-                message.message_id,
-                message.chat.id,
-                getattr(message.from_user, "id", None),
-                d.score,
-                d.should_delete,
-                ",".join(d.reasons),
-                (message.text or message.caption or "")[:120],
-            )
-
-        if not d.should_delete:
-            return
-
-        try:
+        if d.should_delete:
             await message.delete()
-        except Exception as e:
-            log.warning(
-                "Failed to delete message_id=%s in chat=%s: %r",
-                message.message_id,
+            log.info(
+                "Deleted ad message: chat=%s msg=%s score=%s reasons=%s",
                 message.chat.id,
-                e,
+                message.message_id,
+                d.score,
+                ",".join(d.reasons),
             )
 
-    logging.getLogger("antiad").info(
+    log.info(
         "Bot started. target_chat_id=%s delete_channel_messages=%s ad_score_threshold=%s",
         cfg.target_chat_id,
         cfg.delete_channel_messages,
         cfg.ad_score_threshold,
     )
+
     await dp.start_polling(bot)
 
 
