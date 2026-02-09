@@ -21,6 +21,10 @@ async def main() -> None:
     bot = Bot(token=cfg.bot_token)
     dp = Dispatcher()
 
+    @dp.message(F.text == "/chatid")
+    async def chat_id_cmd(message: Message):
+        await message.reply(f"chat_id = {message.chat.id}")
+
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message) -> None:
         if cfg.target_chat_id is not None and message.chat.id != cfg.target_chat_id:
@@ -31,10 +35,7 @@ async def main() -> None:
 
         if message.from_user:
             try:
-                member = await bot.get_chat_member(
-                    message.chat.id,
-                    message.from_user.id,
-                )
+                member = await bot.get_chat_member(message.chat.id, message.from_user.id)
                 if member.status in ("administrator", "creator"):
                     return
             except Exception as e:
