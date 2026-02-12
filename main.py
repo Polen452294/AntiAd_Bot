@@ -83,6 +83,51 @@ async def main() -> None:
 
     await dp.start_polling(bot)
 
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+    async def handle_group_message(message: Message) -> None:
+        if cfg.target_chat_id is not None and message.chat.id != cfg.target_chat_id:
+            return
+
+        if message.video:
+            try:
+                member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+                if member.status not in ("administrator", "creator"):
+                    await message.delete()
+                    log.info(
+                        "Deleted video from non-admin: user=%s chat=%s",
+                        message.from_user.id,
+                        message.chat.id,
+                    )
+                    return
+            except Exception as e:
+                log.warning("Video check failed: %r", e)
+
+        if cfg.delete_channel_messages and message.sender_chat is not None:
+            if message.sender_chat.type == ChatType.CHANNEL:
+                try:
+                    await message.delete()
+                    log.info(
+                        "Deleted channel-sender message: msg=%s chat=%s",
+                        message.message_id,
+                        message.chat.id,
+                    )
+                except Exception as e:
+                    log.warning("Failed to delete channel-sender msg: %r", e)
+                return
+
+        d = decide(message, threshold=cfg.ad_score_threshold)
+
+        if d.should_delete:
+            try:
+                await message.delete()
+                log.info(
+                    "Deleted ad message: user=%s score=%s",
+                    getattr(message.from_user, "id", None),
+                    d.score,
+                )
+            except Exception as e:
+                log.warning("Failed to delete ad message: %r", e)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
