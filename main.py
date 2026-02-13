@@ -90,7 +90,7 @@ async def main() -> None:
 
         d = decide(message, threshold=cfg.ad_score_threshold)
 
-        if d.has_link:
+        if d.reasons:
             log.info(
                 "Decision. chat_id=%s message_id=%s from_user=%s score=%s delete=%s reasons=%s text=%r",
                 message.chat.id,
