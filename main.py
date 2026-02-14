@@ -32,7 +32,7 @@ def write_moderation_log(message: Message, reason: str, extra: str = "") -> None
         sender_chat_id = getattr(message.sender_chat, "id", None) if message.sender_chat else None
         sender_chat_type = getattr(message.sender_chat, "type", None) if message.sender_chat else None
         sender_chat_title = getattr(message.sender_chat, "title", None) if message.sender_chat else None
-
+        media_group_id = getattr(message, "media_group_id", None)
         text = (message.text or message.caption or "").replace("\n", " ").strip()
         if len(text) > 500:
             text = text[:500] + "..."
@@ -45,6 +45,7 @@ def write_moderation_log(message: Message, reason: str, extra: str = "") -> None
             f"reason={reason} "
             f"{extra} "
             f"text={text!r}\n"
+            f"media_group_id={media_group_id} "
         )
 
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -98,15 +99,27 @@ async def safe_delete(message: Message, log: logging.Logger, reason: str) -> boo
 
 def _detect_forbidden_media_kind(message: Message) -> str | None:
     """
-    Возвращает тип запрещённого медиа, если оно есть.
-    Запрещаем для НЕ-админов: видео, фото, документы (любые файлы).
+    Запрещаем для НЕ-админов:
+    - фото (Telegram-сжатие) -> message.photo
+    - видео -> message.video
+    - любые файлы -> message.document
+      + отдельно помечаем картинки, которые отправлены как файл (mime_type image/*)
     """
-    if message.video:
-        return "video"
+    # 1) Сжатые фотки (обычный формат Telegram)
     if message.photo:
         return "photo"
+
+    # 2) Видео
+    if message.video:
+        return "video"
+
+    # 3) Документы (любые файлы)
     if message.document:
-        return "document"
+        mt = (message.document.mime_type or "").lower()
+        if mt.startswith("image/"):
+            return "image_document"   # картинка отправлена как файл
+        return "document"            # любой другой файл
+
     return None
 
 
