@@ -17,14 +17,14 @@ LOG_FILE = Path("moderation_log.txt")
 
 def write_moderation_log(message: Message, reason: str, extra: str = "") -> None:
     """
-    Пишем аудит в текстовый файл для проверки корректности модерации.
-    ВАЖНО: эта функция никогда не должна ломать бота.
+    Аудит модерации в текстовый файл. Никогда не ломает бота.
     """
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         chat_id = message.chat.id
         msg_id = message.message_id
+        media_group_id = getattr(message, "media_group_id", None)
 
         user_id = getattr(message.from_user, "id", None)
         username = getattr(message.from_user, "username", None)
@@ -32,20 +32,19 @@ def write_moderation_log(message: Message, reason: str, extra: str = "") -> None
         sender_chat_id = getattr(message.sender_chat, "id", None) if message.sender_chat else None
         sender_chat_type = getattr(message.sender_chat, "type", None) if message.sender_chat else None
         sender_chat_title = getattr(message.sender_chat, "title", None) if message.sender_chat else None
-        media_group_id = getattr(message, "media_group_id", None)
+
         text = (message.text or message.caption or "").replace("\n", " ").strip()
         if len(text) > 500:
             text = text[:500] + "..."
 
         line = (
             f"[{ts}] "
-            f"chat_id={chat_id} msg_id={msg_id} "
+            f"chat_id={chat_id} msg_id={msg_id} media_group_id={media_group_id} "
             f"user_id={user_id} username={username} "
             f"sender_chat_id={sender_chat_id} sender_chat_type={sender_chat_type} sender_chat_title={sender_chat_title!r} "
             f"reason={reason} "
             f"{extra} "
             f"text={text!r}\n"
-            f"media_group_id={media_group_id} "
         )
 
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -58,25 +57,12 @@ def write_moderation_log(message: Message, reason: str, extra: str = "") -> None
 async def safe_delete(message: Message, log: logging.Logger, reason: str) -> bool:
     """
     Пытаемся удалить сообщение, но никогда не падаем, если Telegram не разрешил.
+    При неуспехе пишем в moderation_log.txt запись delete_failed.
     """
     try:
         await message.delete()
-        log.info(
-            "Deleted message. chat_id=%s message_id=%s reason=%s",
-            message.chat.id,
-            message.message_id,
-            reason,
-        )
+        log.info("Deleted message. chat_id=%s message_id=%s reason=%s", message.chat.id, message.message_id, reason)
         return True
-    except TelegramBadRequest as e:
-        log.info(
-            "Skip delete (bad request). chat_id=%s message_id=%s reason=%s err=%s",
-            message.chat.id,
-            message.message_id,
-            reason,
-            e,
-        )
-        return False
     except TelegramForbiddenError as e:
         log.warning(
             "No rights to delete. chat_id=%s message_id=%s reason=%s err=%s",
@@ -85,6 +71,17 @@ async def safe_delete(message: Message, log: logging.Logger, reason: str) -> boo
             reason,
             e,
         )
+        write_moderation_log(message, "delete_failed", extra=f"reason={reason} err={str(e)!r}")
+        return False
+    except TelegramBadRequest as e:
+        log.info(
+            "Skip delete (bad request). chat_id=%s message_id=%s reason=%s err=%s",
+            message.chat.id,
+            message.message_id,
+            reason,
+            e,
+        )
+        write_moderation_log(message, "delete_failed", extra=f"reason={reason} err={str(e)!r}")
         return False
     except Exception as e:
         log.exception(
@@ -94,38 +91,45 @@ async def safe_delete(message: Message, log: logging.Logger, reason: str) -> boo
             reason,
             e,
         )
+        write_moderation_log(message, "delete_failed", extra=f"reason={reason} err={repr(e)}")
         return False
 
 
 def _detect_forbidden_media_kind(message: Message) -> str | None:
     """
     Запрещаем для НЕ-админов:
-    - фото (Telegram-сжатие) -> message.photo
-    - видео -> message.video
-    - любые файлы -> message.document
-      + отдельно помечаем картинки, которые отправлены как файл (mime_type image/*)
+    - фото (Telegram-сжатие) -> content_type == photo
+    - видео -> content_type == video
+    - любые файлы -> content_type == document
+      + отдельно помечаем картинки, отправленные как файл (mime_type image/*)
     """
-    # 1) Сжатые фотки (обычный формат Telegram)
-    if message.photo:
+    ct = message.content_type
+
+    if ct == "photo":
         return "photo"
 
-    # 2) Видео
-    if message.video:
+    if ct == "video":
         return "video"
 
-    # 3) Документы (любые файлы)
-    if message.document:
+    if ct == "document" and message.document:
         mt = (message.document.mime_type or "").lower()
         if mt.startswith("image/"):
-            return "image_document"   # картинка отправлена как файл
-        return "document"            # любой другой файл
+            return "image_document"
+        return "document"
 
     return None
 
 
 async def _is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    member = await bot.get_chat_member(chat_id, user_id)
-    return member.status in ("administrator", "creator")
+    """
+    Fail-closed: если Telegram не дал проверить статус — считаем пользователя НЕ админом.
+    Это нужно, чтобы медиа не обходили из-за временных ошибок API.
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
 
 
 async def main() -> None:
@@ -146,22 +150,23 @@ async def main() -> None:
         if cfg.target_chat_id is not None and message.chat.id != cfg.target_chat_id:
             return
 
-        # 2) Запрещаем медиа/файлы всем, кроме админов
-        #    (видео + фото + документы)
+        # 2) Запрещаем медиа/файлы всем, кроме админов (photo/video/document)
         forbidden_kind = _detect_forbidden_media_kind(message)
+
+        # пишем аудит самого факта детекта (помогает диагностике)
+        if forbidden_kind:
+            write_moderation_log(
+                message,
+                "media_detected",
+                extra=f"type={forbidden_kind} from_user_present={message.from_user is not None}",
+            )
+
+        # удаляем медиа у не-админов
         if forbidden_kind and message.from_user is not None:
-            try:
-                if not await _is_admin(bot, message.chat.id, message.from_user.id):
-                    write_moderation_log(message, "media_non_admin", extra=f"type={forbidden_kind}")
-                    await safe_delete(message, log, f"media_non_admin:{forbidden_kind}")
-                    return
-            except Exception as e:
-                log.warning(
-                    "Media admin check failed. chat_id=%s message_id=%s err=%r",
-                    message.chat.id,
-                    message.message_id,
-                    e,
-                )
+            if not await _is_admin(bot, message.chat.id, message.from_user.id):
+                write_moderation_log(message, "media_non_admin", extra=f"type={forbidden_kind}")
+                await safe_delete(message, log, f"media_non_admin:{forbidden_kind}")
+                return
 
         # 3) Запрет сообщений от лица других каналов (sender_chat=channel)
         if cfg.delete_channel_messages and message.sender_chat is not None:
@@ -172,7 +177,6 @@ async def main() -> None:
 
         # 4) Антиреклама со ссылками (скоринг)
         d = decide(message, threshold=cfg.ad_score_threshold)
-
         if d.should_delete:
             extra = f"score={d.score} reasons={','.join(d.reasons)}"
             write_moderation_log(message, "ad_detected", extra=extra)
