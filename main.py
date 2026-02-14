@@ -16,6 +16,10 @@ LOG_FILE = Path("moderation_log.txt")
 
 
 def write_moderation_log(message: Message, reason: str, extra: str = "") -> None:
+    """
+    Пишем аудит в текстовый файл для проверки корректности модерации.
+    ВАЖНО: эта функция никогда не должна ломать бота.
+    """
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -92,6 +96,25 @@ async def safe_delete(message: Message, log: logging.Logger, reason: str) -> boo
         return False
 
 
+def _detect_forbidden_media_kind(message: Message) -> str | None:
+    """
+    Возвращает тип запрещённого медиа, если оно есть.
+    Запрещаем для НЕ-админов: видео, фото, документы (любые файлы).
+    """
+    if message.video:
+        return "video"
+    if message.photo:
+        return "photo"
+    if message.document:
+        return "document"
+    return None
+
+
+async def _is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return member.status in ("administrator", "creator")
+
+
 async def main() -> None:
     cfg = load_config()
 
@@ -106,30 +129,35 @@ async def main() -> None:
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message) -> None:
+        # 1) Если задан TARGET_CHAT_ID — работаем только в одной группе обсуждений
         if cfg.target_chat_id is not None and message.chat.id != cfg.target_chat_id:
             return
 
-        if message.video and message.from_user is not None:
+        # 2) Запрещаем медиа/файлы всем, кроме админов
+        #    (видео + фото + документы)
+        forbidden_kind = _detect_forbidden_media_kind(message)
+        if forbidden_kind and message.from_user is not None:
             try:
-                member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-                if member.status not in ("administrator", "creator"):
-                    write_moderation_log(message, "video_non_admin")
-                    await safe_delete(message, log, "video_non_admin")
+                if not await _is_admin(bot, message.chat.id, message.from_user.id):
+                    write_moderation_log(message, "media_non_admin", extra=f"type={forbidden_kind}")
+                    await safe_delete(message, log, f"media_non_admin:{forbidden_kind}")
                     return
             except Exception as e:
                 log.warning(
-                    "Video admin check failed. chat_id=%s message_id=%s err=%r",
+                    "Media admin check failed. chat_id=%s message_id=%s err=%r",
                     message.chat.id,
                     message.message_id,
                     e,
                 )
 
+        # 3) Запрет сообщений от лица других каналов (sender_chat=channel)
         if cfg.delete_channel_messages and message.sender_chat is not None:
             if message.sender_chat.type == ChatType.CHANNEL:
                 write_moderation_log(message, "channel_sender")
                 await safe_delete(message, log, "channel_sender")
                 return
 
+        # 4) Антиреклама со ссылками (скоринг)
         d = decide(message, threshold=cfg.ad_score_threshold)
 
         if d.should_delete:
