@@ -26,6 +26,7 @@ class Config:
     ad_score_threshold: int
 
     log_level: str
+    test_mode_delete_admins: bool  # ← новое поле
 
 
 def load_config() -> Config:
@@ -40,10 +41,17 @@ def load_config() -> Config:
     ad_score_threshold = _as_int(os.getenv("AD_SCORE_THRESHOLD"), default=2)
     log_level = (os.getenv("LOG_LEVEL") or "INFO").upper()
 
+    # 🔥 Новая переменная
+    test_mode_delete_admins = _as_bool(
+        os.getenv("TEST_MODE_DELETE_ADMINS"),
+        default=False,
+    )
+
     return Config(
         bot_token=token,
         target_chat_id=chat_id,
         delete_channel_messages=delete_channel_messages,
         ad_score_threshold=ad_score_threshold,
         log_level=log_level,
+        test_mode_delete_admins=test_mode_delete_admins,  # ← обязательно передаём
     )
