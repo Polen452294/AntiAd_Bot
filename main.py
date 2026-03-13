@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -9,10 +10,32 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import Message
 
 from config import load_config
-from moderation import decide
 
 
 LOG_FILE = Path("moderation_log.txt")
+
+LINK_RE = re.compile(
+    r"("
+    r"https?://\S+"
+    r"|www\.\S+"
+    r"|t\.me/\S+"
+    r"|telegram\.me/\S+"
+    r"|vk\.com/\S+"
+    r"|vkontakte\.ru/\S+"
+    r"|discord\.gg/\S+"
+    r"|wa\.me/\S+"
+    r"|bit\.ly/\S+"
+    r"|cutt\.ly/\S+"
+    r"|tinyurl\.com/\S+"
+    r"|goo\.su/\S+"
+    r")",
+    re.IGNORECASE,
+)
+
+USERNAME_RE = re.compile(
+    r"(?<!\w)@[A-Za-z0-9_]{4,32}\b",
+    re.IGNORECASE,
+)
 
 
 def write_moderation_log(message: Message, reason: str, extra: str = "") -> None:
@@ -26,6 +49,7 @@ def write_moderation_log(message: Message, reason: str, extra: str = "") -> None
         line = (
             f"[{ts}] "
             f"chat_id={message.chat.id} "
+            f"msg_id={message.message_id} "
             f"user_id={getattr(message.from_user, 'id', None)} "
             f"username={getattr(message.from_user, 'username', None)} "
             f"reason={reason} "
@@ -50,23 +74,57 @@ async def safe_delete(message: Message, log: logging.Logger, reason: str) -> boo
         )
         return True
     except TelegramBadRequest as e:
-        log.warning("DELETE BAD REQUEST | %s", e)
+        log.warning(
+            "DELETE BAD REQUEST | chat_id=%s | msg_id=%s | reason=%s | err=%s",
+            message.chat.id,
+            message.message_id,
+            reason,
+            e,
+        )
         return False
     except TelegramForbiddenError as e:
-        log.error("DELETE FORBIDDEN (no rights) | %s", e)
+        log.error(
+            "DELETE FORBIDDEN | chat_id=%s | msg_id=%s | reason=%s | err=%s",
+            message.chat.id,
+            message.message_id,
+            reason,
+            e,
+        )
         return False
     except Exception as e:
-        log.exception("DELETE UNKNOWN ERROR | %r", e)
+        log.exception(
+            "DELETE UNKNOWN ERROR | chat_id=%s | msg_id=%s | reason=%s | err=%r",
+            message.chat.id,
+            message.message_id,
+            reason,
+            e,
+        )
         return False
+
+
+def _extract_text(message: Message) -> str:
+    return (message.text or message.caption or "").strip()
 
 
 def _detect_forbidden_media_kind(message: Message) -> str | None:
-    if message.video:
-        return "video"
     if message.photo:
         return "photo"
+    if message.video:
+        return "video"
     if message.document:
         return "document"
+    return None
+
+
+def _detect_link_reason(message: Message) -> str | None:
+    text = _extract_text(message)
+    if not text:
+        return None
+
+    if LINK_RE.search(text):
+        return "link"
+    if USERNAME_RE.search(text):
+        return "username"
     return None
 
 
@@ -79,12 +137,10 @@ async def main() -> None:
     )
     log = logging.getLogger("antiad")
 
-    # === Конфигурация при старте ===
     log.info("=== BOT START ===")
     log.info("CONFIG | test_mode_delete_admins=%s", cfg.test_mode_delete_admins)
     log.info("CONFIG | target_chat_id=%s", cfg.target_chat_id)
     log.info("CONFIG | delete_channel_messages=%s", cfg.delete_channel_messages)
-    log.info("CONFIG | ad_score_threshold=%s", cfg.ad_score_threshold)
 
     bot = Bot(token=cfg.bot_token)
     dp = Dispatcher()
@@ -96,15 +152,13 @@ async def main() -> None:
             message.chat.id,
             getattr(message.from_user, "id", None),
             getattr(message.from_user, "username", None),
-            message.text or message.caption,
+            _extract_text(message),
         )
 
-        # Проверка чата
         if cfg.target_chat_id is not None and message.chat.id != cfg.target_chat_id:
             log.info("SKIP | wrong chat_id")
             return
 
-        # Проверка статуса пользователя
         if message.from_user:
             try:
                 member = await bot.get_chat_member(message.chat.id, message.from_user.id)
@@ -125,7 +179,6 @@ async def main() -> None:
             except Exception as e:
                 log.exception("ERROR getting member status | %r", e)
 
-        # Медиа
         forbidden_kind = _detect_forbidden_media_kind(message)
         if forbidden_kind:
             log.info("TRIGGER | forbidden media | type=%s", forbidden_kind)
@@ -133,7 +186,6 @@ async def main() -> None:
             await safe_delete(message, log, f"media_forbidden:{forbidden_kind}")
             return
 
-        # Channel sender
         if cfg.delete_channel_messages and message.sender_chat is not None:
             if message.sender_chat.type == ChatType.CHANNEL:
                 log.info("TRIGGER | channel sender message")
@@ -141,24 +193,11 @@ async def main() -> None:
                 await safe_delete(message, log, "channel_sender")
                 return
 
-        # Антиреклама
-        d = decide(message, threshold=cfg.ad_score_threshold)
-
-        log.info(
-            "DECIDE | score=%s | should_delete=%s | reasons=%s",
-            d.score,
-            d.should_delete,
-            d.reasons,
-        )
-
-        if d.should_delete:
-            log.info("TRIGGER | ad detected")
-            write_moderation_log(
-                message,
-                "ad_detected",
-                f"score={d.score} reasons={','.join(d.reasons)}",
-            )
-            await safe_delete(message, log, f"ad_score:{d.score}")
+        link_reason = _detect_link_reason(message)
+        if link_reason:
+            log.info("TRIGGER | %s detected", link_reason)
+            write_moderation_log(message, "link_detected", f"type={link_reason}")
+            await safe_delete(message, log, f"link_detected:{link_reason}")
             return
 
         log.info("MESSAGE PASSED")
