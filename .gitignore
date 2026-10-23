@@ -23,6 +23,8 @@ Thumbs.db
 
 # Logs
 *.log
+data/
+deleted_messages*.jsonl
 
 # Build / cache
 .dist/

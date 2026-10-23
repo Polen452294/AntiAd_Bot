@@ -15,6 +15,7 @@ def clean_config(monkeypatch):
         "SPAM_REPEAT_WINDOW",
         "SPAM_FLOOD_LIMIT",
         "SPAM_FLOOD_WINDOW",
+        "DELETION_LOG_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BOT_TOKEN", "123456:test")

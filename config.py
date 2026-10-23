@@ -32,6 +32,7 @@ class Config:
     spam_repeat_window: int = 60
     spam_flood_limit: int = 6
     spam_flood_window: int = 10
+    deletion_log_path: str = "data/deleted_messages.jsonl"
 
 
 def load_config() -> Config:
@@ -72,5 +73,6 @@ def load_config() -> Config:
         delete_channel_messages=delete_channel_messages,
         ad_score_threshold=ad_score_threshold,
         log_level=log_level,
+        deletion_log_path=(os.getenv("DELETION_LOG_PATH") or "data/deleted_messages.jsonl").strip(),
         **spam_settings,
     )

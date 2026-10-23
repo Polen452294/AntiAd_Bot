@@ -13,6 +13,7 @@ from aiogram.exceptions import (
 )
 from aiogram.types import ChatMember, ChatMemberUpdated, Message
 
+from audit import DeletionJournal
 from config import Config, load_config
 from moderation import SpamTracker, decide
 
@@ -54,7 +55,7 @@ async def safe_delete(message: Message, log: logging.Logger, reason: str) -> boo
             )
         except TelegramBadRequest as error:
             if "message to delete not found" in error.message.lower():
-                return True  # Already removed by another moderator or a repeated update.
+                return False  # Already absent; do not claim that this bot deleted it.
             log.error(
                 "DELETE FAILED | chat_id=%s | msg_id=%s | err=%s | "
                 "Назначьте бота администратором с правом удаления сообщений",
@@ -80,8 +81,35 @@ def can_delete_messages(member: ChatMember, chat_type: str) -> bool:
     )
 
 
+async def delete_with_journal(
+    message: Message, log: logging.Logger, reason: str, journal: DeletionJournal
+) -> bool:
+    try:
+        operation_id = await journal.begin(message, reason)
+    except OSError:
+        log.exception(
+            "AUDIT WRITE FAILED | chat_id=%s | msg_id=%s | Message preserved",
+            message.chat.id,
+            message.message_id,
+        )
+        return False
+    deleted = await safe_delete(message, log, reason)
+    try:
+        await journal.record("deleted" if deleted else "not_deleted", message, reason, operation_id)
+    except OSError:
+        # The write-ahead entry already holds a durable copy of the message.
+        log.exception(
+            "AUDIT RESULT WRITE FAILED | chat_id=%s | msg_id=%s | operation_id=%s",
+            message.chat.id,
+            message.message_id,
+            operation_id,
+        )
+    return deleted
+
+
 def create_dispatcher(cfg: Config) -> Dispatcher:
     log = logging.getLogger("antiad")
+    journal = DeletionJournal(cfg.deletion_log_path)
     dp = Dispatcher()
     spam = SpamTracker(
         cfg.spam_repeat_limit,
@@ -101,7 +129,7 @@ def create_dispatcher(cfg: Config) -> Dispatcher:
             if message.sender_chat.id == message.chat.id or message.is_automatic_forward:
                 return
             if cfg.delete_channel_messages:
-                await safe_delete(message, log, "channel_sender")
+                await delete_with_journal(message, log, "channel_sender", journal)
                 return
         elif message.from_user:
             try:
@@ -126,7 +154,7 @@ def create_dispatcher(cfg: Config) -> Dispatcher:
         if decision.should_delete or spam_reason:
             reasons = decision.reasons if decision.should_delete else []
             reason = ",".join(reasons + ([spam_reason] if spam_reason else []))
-            await safe_delete(message, log, reason)
+            await delete_with_journal(message, log, reason, journal)
 
     @dp.my_chat_member(F.chat.type.in_(GROUP_TYPES))
     async def handle_bot_rights(event: ChatMemberUpdated) -> None:

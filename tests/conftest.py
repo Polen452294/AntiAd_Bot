@@ -71,7 +71,7 @@ def telegram():
 
 
 @pytest.fixture
-def cfg():
+def cfg(tmp_path):
     from config import Config
 
     return Config(
@@ -80,4 +80,5 @@ def cfg():
         delete_channel_messages=True,
         ad_score_threshold=2,
         log_level="INFO",
+        deletion_log_path=str(tmp_path / "deleted_messages.jsonl"),
     )
